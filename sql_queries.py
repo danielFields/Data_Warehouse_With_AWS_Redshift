@@ -1,0 +1,216 @@
+import configparser
+
+
+# CONFIG
+config = configparser.ConfigParser()
+config.read_file(open('dwh.cfg'))
+
+song_data_path = config.get("S3","SONG_DATA") 
+log_data_path = config.get("S3","LOG_DATA")
+log_data_jsonpath = config.get("S3","LOG_JSONPATH")
+
+
+DWH_ROLE_ARN = config.get("IAM_ROLE","ARN")
+
+# CREATE SCHEMAS FOR STAGING(OLTP) AND STAR(OLAP)
+create_staging_schema = "CREATE SCHEMA IF NOT EXISTS STAGING;"
+create_star_schema = "CREATE SCHEMA IF NOT EXISTS STAR;"
+# DROP TABLES
+
+staging_events_table_drop = "DROP TABLE IF EXISTS DWH.STAGING.EVENTS_STAGING;"
+staging_songs_table_drop = "DROP TABLE IF EXISTS DWH.STAGING.SONGS_STAGING;"
+songplay_table_drop = "DROP TABLE IF EXISTS DWH.STAR.SONGPLAYS;"
+user_table_drop = "DROP TABLE IF EXISTS DWH.STAR.USERS;"
+song_table_drop = "DROP TABLE IF EXISTS DWH.STAR.SONGS;"
+artist_table_drop = "DROP TABLE IF EXISTS DWH.STAR.ARTISTS;"
+time_table_drop = "DROP TABLE IF EXISTS DWH.STAR.TIME;"
+
+# CREATE TABLES
+
+staging_events_table_create= ("""
+CREATE TABLE DWH.STAGING.EVENTS_STAGING
+(ARTIST VARCHAR DISTKEY,
+AUTH VARCHAR,
+FIRSTNAME VARCHAR,
+GENDER VARCHAR,
+ITEMINSESSION INT,
+LASTNAME VARCHAR,
+LENGTH NUMERIC,
+LEVEL VARCHAR,
+LOCATION VARCHAR,
+METHOD VARCHAR,
+PAGE VARCHAR NOT NULL,
+REGISTRATION NUMERIC,
+SESSIONID INT,
+SONG VARCHAR,
+STATUS INT,
+TS FLOAT,
+USERAGENT VARCHAR,
+USERID VARCHAR);
+""")
+#Use artist as distkey for fast joining for loading into the songplays table
+staging_songs_table_create = ("""
+CREATE TABLE DWH.STAGING.SONGS_STAGING
+(NUM_SONGS INT,
+ARTIST_ID VARCHAR, 
+ARTIST_LATITUDE NUMERIC,
+ARTIST_LONGITUDE NUMERIC,
+ARTIST_LOCATION VARCHAR DEFAULT 'Unknown', 
+ARTIST_NAME VARCHAR DISTKEY, 
+SONG_ID VARCHAR,
+TITLE VARCHAR,
+DURATION NUMERIC,
+YEAR INT);
+""")
+
+songplay_table_create = ("""
+CREATE TABLE DWH.STAR.SONGPLAYS 
+(SONGPLAY_ID BIGINT IDENTITY(0,1), 
+START_TIME TIMESTAMP NOT NULL, 
+USER_ID VARCHAR NOT NULL, 
+LEVEL VARCHAR, 
+SONG_ID VARCHAR DEFAULT 'Unknown', 
+ARTIST_ID VARCHAR DEFAULT 'Unknown', 
+SESSION_ID INT, LOCATION VARCHAR, 
+USER_AGENT VARCHAR);
+""")
+
+user_table_create = ("""
+CREATE TABLE DWH.STAR.USERS 
+(USER_ID VARCHAR NOT NULL, 
+FIRST_NAME VARCHAR, 
+LAST_NAME VARCHAR, 
+GENDER VARCHAR, 
+LEVEL VARCHAR);
+""")
+
+song_table_create = ("""
+CREATE TABLE DWH.STAR.SONGS 
+(SONG_ID VARCHAR NOT NULL,
+TITLE VARCHAR, 
+ARTIST_ID VARCHAR, 
+YEAR INT, 
+DURATION NUMERIC);
+""")
+
+artist_table_create = ("""
+CREATE TABLE DWH.STAR.ARTISTS 
+(ARTIST_ID VARCHAR NOT NULL, 
+NAME VARCHAR, 
+LOCATION VARCHAR, 
+LATITUDE NUMERIC, 
+LONGITUDE NUMERIC);
+""")
+
+time_table_create = ("""
+CREATE TABLE DWH.STAR.TIME 
+(START_TIME TIMESTAMP NOT NULL, 
+HOUR SMALLINT, 
+DAY SMALLINT, 
+WEEK SMALLINT, 
+MONTH SMALLINT, 
+YEAR SMALLINT, 
+WEEKDAY SMALLINT);
+""")
+
+# STAGING TABLES
+
+staging_events_copy = """
+COPY DWH.STAGING.EVENTS_STAGING FROM {}
+credentials 'aws_iam_role={}'
+format as json {}
+STATUPDATE ON
+region 'us-west-2';
+""".format(log_data_path,DWH_ROLE_ARN,log_data_jsonpath)
+
+staging_songs_copy = ("""
+COPY DWH.STAGING.SONGS_STAGING FROM {}
+credentials 'aws_iam_role={}'
+format as json 'auto ignorecase'
+STATUPDATE ON
+region 'us-west-2';
+""".format(song_data_path,DWH_ROLE_ARN))
+
+# FINAL TABLES
+
+songplay_table_insert = ("""
+INSERT INTO DWH.STAR.SONGPLAYS (START_TIME, USER_ID, LEVEL, SONG_ID, ARTIST_ID, SESSION_ID, LOCATION, USER_AGENT) 
+SELECT DISTINCT
+TIMESTAMP 'epoch' + TS/1000 *INTERVAL '1 second'  AS START_TIME,
+EVENTS_STAGING.USERID AS USER_ID,
+EVENTS_STAGING.LEVEL AS LEVEL,
+SONGS_STAGING.SONG_ID AS SONG_ID,
+SONGS_STAGING.ARTIST_ID AS ARTIST_ID,
+EVENTS_STAGING.SESSIONID AS SESSION_ID,
+EVENTS_STAGING.LOCATION AS LOCATION,
+EVENTS_STAGING.USERAGENT AS USER_AGENT
+FROM 
+DWH.STAGING.SONGS_STAGING 
+JOIN 
+DWH.STAGING.EVENTS_STAGING
+ON (DWH.STAGING.SONGS_STAGING.ARTIST_NAME = DWH.STAGING.EVENTS_STAGING.ARTIST)
+WHERE DWH.STAGING.EVENTS_STAGING.PAGE = 'NextSong';
+""")
+
+user_table_insert = ("""
+INSERT INTO DWH.STAR.USERS (USER_ID, FIRST_NAME, LAST_NAME, GENDER, LEVEL) 
+SELECT DISTINCT
+USERID AS USER_ID,
+FIRSTNAME AS FIRST_NAME,
+LASTNAME AS LAST_NAME,
+GENDER,
+LEVEL
+FROM 
+DWH.STAGING.EVENTS_STAGING
+WHERE PAGE = 'NextSong';
+""")
+
+# Making the decision here to omit songs that have duplicate song ID's since in the JSON files the two songs with matching song ID's are the same.
+song_table_insert = ("""
+INSERT INTO DWH.STAR.SONGS (SONG_ID, TITLE, ARTIST_ID, YEAR, DURATION) 
+SELECT DISTINCT
+SONG_ID,
+TITLE,
+ARTIST_ID,
+YEAR,
+DURATION
+FROM DWH.STAGING.SONGS_STAGING;
+""")
+
+artist_table_insert = ("""
+INSERT INTO DWH.STAR.ARTISTS (ARTIST_ID, NAME, LOCATION, LATITUDE, LONGITUDE) 
+SELECT DISTINCT
+ARTIST_ID,
+ARTIST_NAME AS NAME,
+ARTIST_LOCATION AS LOCATION,
+ARTIST_LATITUDE AS LATITUDE,
+ARTIST_LONGITUDE AS LONGITUDE
+FROM DWH.STAGING.SONGS_STAGING
+WHERE ARTIST_ID IS NOT NULL;
+""")
+
+
+time_table_insert = ("""
+INSERT INTO DWH.STAR.TIME (START_TIME, HOUR, DAY, WEEK, MONTH, YEAR, WEEKDAY) 
+SELECT DISTINCT
+START_TIME,
+EXTRACT(hour FROM START_TIME) AS HOUR,
+EXTRACT(day FROM START_TIME) AS DAY,
+EXTRACT(week FROM START_TIME) AS WEEK,
+EXTRACT(month FROM START_TIME) AS MONTH,
+EXTRACT(year FROM START_TIME) AS YEAR,
+EXTRACT(dow FROM START_TIME) AS WEEKDAY 
+FROM
+(SELECT DISTINCT TIMESTAMP 'epoch' + TS/1000 *INTERVAL '1 second' AS START_TIME 
+FROM DWH.STAGING.EVENTS_STAGING 
+WHERE PAGE = 'NextSong'
+AND TS IS NOT NULL);
+""")
+
+# QUERY LISTS
+
+create_schema_queries = [create_staging_schema, create_star_schema]
+create_table_queries = [staging_events_table_create, staging_songs_table_create, songplay_table_create, user_table_create, song_table_create, artist_table_create, time_table_create]
+drop_table_queries = [staging_events_table_drop, staging_songs_table_drop, songplay_table_drop, user_table_drop, song_table_drop, artist_table_drop, time_table_drop]
+copy_table_queries = [staging_events_copy, staging_songs_copy]
+insert_table_queries = [songplay_table_insert, user_table_insert, song_table_insert, artist_table_insert, time_table_insert]
