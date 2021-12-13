@@ -62,7 +62,7 @@ This project creates and executes an ETL pipeline for a mock music streaming app
 
 The ETL process that is used here is:
 1. Copy data from S3 to a staging schema in Redshift (OLTP Schema Name = `STAGE`).
-2. Insert data into a Star Schema (OLAP Schema Name = `Star`) by quetying data from the Staging schema.
+2. Insert data into a Star Schema (OLAP Schema Name = `STAR`) by quetying data from the Staging schema.
 
 ## Purpose of Database
 To store data from user activity on our Sparkify Music Streaming App in a database whose structure allows for analytical dataset creation and ad-hoc querying across several dimensions.
