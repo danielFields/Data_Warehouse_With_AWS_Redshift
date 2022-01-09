@@ -53,7 +53,8 @@ DWH_DB_PASSWORD=********
 DWH_PORT=5439
 ```
 
-
+### 3. Create redshift cluster using boto3 and Python.
+In this project, the script `create_redshift_cluster.py` is used to create a redshift cluster within a VPC associated with the AWS account the redshift cluster will be used in.
 
 # The ETL Process:
 
